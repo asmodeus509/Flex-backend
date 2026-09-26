@@ -1,289 +1,202 @@
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import morgan from 'morgan';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
-import Database from 'better-sqlite3';
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { Pool } = require('pg');
 
 const app = express();
-const PORT = Number(process.env.PORT || 3000);
-const JWT_SECRET = process.env.JWT_SECRET || 'CHANGE_ME_IN_ENV';
-const DB_FILE = process.env.DB_FILE || 'flex_tupup.sqlite';
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@flextupup.com';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || '';
+app.disable('x-powered-by');
+app.use(express.json({limit:'2mb'}));
+app.use(express.urlencoded({extended:false}));
 
-if (JWT_SECRET === 'CHANGE_ME_IN_ENV' || JWT_SECRET.length < 32) console.warn('WARNING: set a long random JWT_SECRET in .env');
-if (!ADMIN_PASSWORD) console.warn('WARNING: set ADMIN_PASSWORD in .env before production use');
+const origins=(process.env.CORS_ORIGINS||'*').split(',').map(x=>x.trim()).filter(Boolean);
+app.use(cors({origin:(origin,cb)=>{ if(!origin || origins.includes('*') || origins.includes(origin)) return cb(null,true); return cb(new Error('CORS not allowed')); }, credentials:false}));
 
-const db = new Database(DB_FILE);
-db.pragma('journal_mode=WAL');
-db.pragma('foreign_keys=ON');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? {rejectUnauthorized:false} : false,
+  max:10,
+  idleTimeoutMillis:30000,
+  connectionTimeoutMillis:10000
+});
 
-app.use(helmet({ crossOriginResourcePolicy: false }));
-app.use(cors({ origin: process.env.CORS_ORIGIN || true, credentials: true }));
-app.use(express.json({ limit: '3mb' }));
-app.use(morgan('tiny'));
+const JWT_SECRET=process.env.JWT_SECRET;
+if(!JWT_SECRET) console.warn('WARNING: JWT_SECRET is not set');
 
-const now = () => new Date().toISOString();
-const makeId = p => `${p}_${crypto.randomBytes(8).toString('hex')}`;
-const money = n => Number(Number(n || 0).toFixed(2));
-const clean = (v, max = 160) => String(v ?? '').trim().slice(0, max);
-
-// ---------------- DB ----------------
-db.exec(`
-CREATE TABLE IF NOT EXISTS users(
- id TEXT PRIMARY KEY, name TEXT NOT NULL, contact TEXT UNIQUE NOT NULL,
- password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'client',
- balance REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS orders(
- id TEXT PRIMARY KEY, user_id TEXT, game TEXT NOT NULL, pack TEXT NOT NULL,
- price REAL NOT NULL, uid TEXT DEFAULT '', phone TEXT DEFAULT '', referral_code TEXT DEFAULT '',
- category TEXT NOT NULL, status TEXT NOT NULL, payment TEXT NOT NULL,
- admin_note TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
- FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
-);
-CREATE TABLE IF NOT EXISTS notifications(
- id TEXT PRIMARY KEY, user_id TEXT, type TEXT NOT NULL, title TEXT NOT NULL,
- message TEXT NOT NULL, payload TEXT DEFAULT '{}', read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS referrals(
- id TEXT PRIMARY KEY, code TEXT UNIQUE NOT NULL, affiliate TEXT NOT NULL,
- active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS game_rules(game TEXT PRIMARY KEY, category TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS games(
- id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, image TEXT DEFAULT '',
- enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS packs(
- id INTEGER PRIMARY KEY AUTOINCREMENT, game_id INTEGER NOT NULL, category TEXT NOT NULL,
- name TEXT NOT NULL, price REAL NOT NULL, image TEXT DEFAULT '', popular INTEGER NOT NULL DEFAULT 0,
- premium INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
- FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS media(key TEXT PRIMARY KEY,url TEXT,updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS topups(
- id TEXT PRIMARY KEY,user_id TEXT NOT NULL,amount REAL NOT NULL,method TEXT NOT NULL,
- reference TEXT DEFAULT '',status TEXT NOT NULL,admin_note TEXT DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
- FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS tutorial(id INTEGER PRIMARY KEY CHECK(id=1),config TEXT NOT NULL,updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY,actor_id TEXT,action TEXT,entity TEXT,entity_id TEXT,meta TEXT,created_at TEXT);
-CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id,created_at);
-CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id,created_at);
-CREATE INDEX IF NOT EXISTS idx_topups_status ON topups(status,created_at);
-`);
-
-function seed() {
-  if (!db.prepare('SELECT 1 FROM users WHERE contact=?').get(ADMIN_EMAIL)) {
-    if (!ADMIN_PASSWORD) throw new Error('ADMIN_PASSWORD must be set for first startup');
-    const t = now();
-    db.prepare('INSERT INTO users(id,name,contact,password_hash,role,created_at,updated_at) VALUES(?,?,?,?,?,?,?)')
-      .run(makeId('USR'), 'FLEX Admin', ADMIN_EMAIL, bcrypt.hashSync(ADMIN_PASSWORD, 12), 'admin', t, t);
+async function query(text,params){return pool.query(text,params)}
+async function migrate(){
+  await query(`CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'client' CHECK(role IN ('client','admin')),
+    whatsapp TEXT,
+    wallet_balance NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK(wallet_balance >= 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );`);
+  await query(`CREATE TABLE IF NOT EXISTS games (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    image TEXT,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    sort_order INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );`);
+  await query(`CREATE TABLE IF NOT EXISTS packs (
+    id BIGSERIAL PRIMARY KEY,
+    game_id BIGINT NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    quantity NUMERIC(12,2) NOT NULL DEFAULT 0,
+    price NUMERIC(12,2) NOT NULL CHECK(price >= 0),
+    image TEXT,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    popular BOOLEAN NOT NULL DEFAULT FALSE,
+    sort_order INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );`);
+  await query(`CREATE TABLE IF NOT EXISTS payment_settings (
+    id SMALLINT PRIMARY KEY DEFAULT 1,
+    moncash_number TEXT,
+    natcash_number TEXT,
+    whatsapp_number TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );`);
+  await query(`CREATE TABLE IF NOT EXISTS wallet_deposits (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    amount NUMERIC(12,2) NOT NULL CHECK(amount > 0),
+    method TEXT NOT NULL CHECK(method IN ('moncash','natcash')),
+    transaction_code TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+    admin_note TEXT,
+    reviewed_by BIGINT REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reviewed_at TIMESTAMPTZ
+  );`);
+  await query(`CREATE UNIQUE INDEX IF NOT EXISTS wallet_deposits_tx_unique ON wallet_deposits(method, transaction_code);`);
+  await query(`CREATE TABLE IF NOT EXISTS orders (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    pack_id BIGINT NOT NULL REFERENCES packs(id),
+    game_id BIGINT NOT NULL REFERENCES games(id),
+    price NUMERIC(12,2) NOT NULL CHECK(price >= 0),
+    player_id TEXT,
+    whatsapp TEXT,
+    status TEXT NOT NULL DEFAULT 'paid' CHECK(status IN ('paid','processing','completed','rejected','cancelled')),
+    fulfillment_note TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );`);
+  await query(`CREATE TABLE IF NOT EXISTS ads (
+    id BIGSERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    image TEXT,
+    price NUMERIC(12,2),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    sort_order INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );`);
+  await query(`CREATE TABLE IF NOT EXISTS notifications (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    read_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );`);
+  await query(`CREATE TABLE IF NOT EXISTS wallet_ledger (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    type TEXT NOT NULL CHECK(type IN ('deposit','purchase','adjustment')),
+    amount NUMERIC(12,2) NOT NULL,
+    reference_type TEXT,
+    reference_id BIGINT,
+    balance_after NUMERIC(12,2) NOT NULL,
+    note TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );`);
+  await query(`INSERT INTO payment_settings(id,moncash_number,natcash_number,whatsapp_number) VALUES(1,$1,$2,$3) ON CONFLICT(id) DO NOTHING`,[process.env.MONCASH_NUMBER||'',process.env.NATCASH_NUMBER||'',process.env.WHATSAPP_NUMBER||'50956140799']);
+  if(process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD){
+    const email=process.env.ADMIN_EMAIL.trim().toLowerCase();
+    const existing=await query('SELECT id FROM users WHERE email=$1',[email]);
+    const hash=await bcrypt.hash(process.env.ADMIN_PASSWORD,12);
+    if(existing.rowCount===0) await query('INSERT INTO users(name,email,password_hash,role,whatsapp) VALUES($1,$2,$3,\'admin\',$4)',[process.env.ADMIN_NAME||'Flex Tupup Admin',email,hash,process.env.WHATSAPP_NUMBER||'']);
+    else await query('UPDATE users SET role=\'admin\',name=$1,whatsapp=$2,updated_at=NOW() WHERE email=$3',[process.env.ADMIN_NAME||'Flex Tupup Admin',process.env.WHATSAPP_NUMBER||'',email]);
   }
-  const defaults = [
-    ['Free Fire','id'], ['Blood Strike','id'], ['eFootball','phone_referral'], ['PUBG Mobile','phone_referral'],
-    ['Call of Duty','phone_referral'], ['FC Mobile','phone_referral'], ['DLS 26','phone_referral'], ['Roblox','phone_referral'],
-    ['Lords Mobile','phone_referral']
-  ];
-  const insRule = db.prepare('INSERT OR IGNORE INTO game_rules(game,category) VALUES(?,?)');
-  for (const r of defaults) insRule.run(...r);
-  const t = now();
-  const insGame = db.prepare('INSERT OR IGNORE INTO games(name,image,enabled,created_at,updated_at) VALUES(?,?,?,?,?)');
-  for (const [name] of defaults) insGame.run(name, '', 1, t, t);
-  db.prepare('INSERT OR IGNORE INTO tutorial(id,config,updated_at) VALUES(1,?,?)').run(JSON.stringify({enabled:true,videoUrl:''}),t);
-}
-seed();
-
-// ---------------- auth ----------------
-function tokenFor(u) { return jwt.sign({ sub:u.id, role:u.role }, JWT_SECRET, { expiresIn:'7d' }); }
-function getUser(id) { return db.prepare('SELECT id,name,contact,role,balance,created_at,updated_at FROM users WHERE id=?').get(id); }
-function auth(req,res,next) {
-  const h = req.headers.authorization || '';
-  if (!h.startsWith('Bearer ')) return res.status(401).json({error:'AUTH_REQUIRED'});
-  try { req.user = jwt.verify(h.slice(7), JWT_SECRET); next(); }
-  catch { return res.status(401).json({error:'INVALID_TOKEN'}); }
-}
-function optionalAuth(req,res,next) {
-  const h=req.headers.authorization||'';
-  if (h.startsWith('Bearer ')) { try { req.user=jwt.verify(h.slice(7),JWT_SECRET); } catch {} }
-  next();
-}
-function admin(req,res,next) { auth(req,res,()=>req.user.role==='admin' ? next() : res.status(403).json({error:'ADMIN_REQUIRED'})); }
-function audit(actor,action,entity,entityId,meta={}) {
-  db.prepare('INSERT INTO audit_logs VALUES(?,?,?,?,?,?,?)').run(makeId('AUD'),actor||null,action,entity,entityId||null,JSON.stringify(meta),now());
 }
 
-// ---------------- realtime notifications ----------------
-const streams = new Set();
-function pushEvent(event) {
-  const data = `data: ${JSON.stringify(event)}\n\n`;
-  for (const s of streams) {
-    if (s.userId === null || s.userId === event.userId || event.userId === null) {
-      try { s.res.write(data); } catch { streams.delete(s); }
-    }
-  }
+function tokenFor(u){return jwt.sign({sub:String(u.id),role:u.role},JWT_SECRET,{expiresIn:'7d'})}
+function auth(req,res,next){
+  const h=req.headers.authorization||''; if(!h.startsWith('Bearer ')) return res.status(401).json({error:'Authentication required'});
+  try{req.auth=jwt.verify(h.slice(7),JWT_SECRET);next()}catch(e){return res.status(401).json({error:'Invalid or expired token'})}
 }
-function notify({userId=null,type,title,message,payload={}}) {
-  const n={id:makeId('NTF'),user_id:userId,type,title,message,payload:JSON.stringify(payload),read:0,created_at:now()};
-  db.prepare('INSERT INTO notifications VALUES(?,?,?,?,?,?,?,?)').run(n.id,n.user_id,n.type,n.title,n.message,n.payload,n.read,n.created_at);
-  pushEvent({ ...n, payload });
-  return n;
-}
+function admin(req,res,next){if(req.auth?.role!=='admin') return res.status(403).json({error:'Admin only'});next()}
+function cleanUser(r){return {id:r.id,name:r.name,email:r.email,role:r.role,whatsapp:r.whatsapp,walletBalance:Number(r.wallet_balance),active:r.active,createdAt:r.created_at}}
+function cleanGame(r){return {id:r.id,name:r.name,image:r.image,active:r.active,sortOrder:r.sort_order}}
+function cleanPack(r){return {id:r.id,gameId:r.game_id,name:r.name,quantity:Number(r.quantity),price:Number(r.price),image:r.image,active:r.active,popular:r.popular,sortOrder:r.sort_order}}
 
-// ---------------- health/static ----------------
-app.get('/api/health',(req,res)=>res.json({ok:true,service:'FLEX TUPUP backend',time:now(),version:'2.0.0'}));
-app.post('/api/keep-alive',auth,(req,res)=>res.json({ok:true,time:now()}));
-app.get('/api/events',auth,(req,res)=>{
-  res.set({ 'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive','X-Accel-Buffering':'no' });
-  res.flushHeaders?.();
-  const stream={res,userId:req.user.role==='admin'?null:req.user.sub}; streams.add(stream);
-  res.write(`data: ${JSON.stringify({type:'connected',time:now()})}\n\n`);
-  const timer=setInterval(()=>{ try{res.write(': ping\\n\\n');}catch{} },25000);
-  req.on('close',()=>{clearInterval(timer);streams.delete(stream);});
-});
+app.get('/health',(req,res)=>res.json({ok:true,service:'flex-tupup-backend',time:new Date().toISOString()}));
+app.get('/api/health',(req,res)=>res.json({ok:true,service:'flex-tupup-backend',time:new Date().toISOString()}));
 
-// ---------------- auth endpoints ----------------
-app.post('/api/auth/register',(req,res)=>{
-  const name=clean(req.body?.name,80), contact=clean(req.body?.contact,160), password=String(req.body?.password||'');
-  if(!name||!contact||password.length<6) return res.status(400).json({error:'INVALID_INPUT'});
-  if(db.prepare('SELECT 1 FROM users WHERE contact=?').get(contact)) return res.status(409).json({error:'CONTACT_EXISTS'});
-  const t=now(), u={id:makeId('USR'),name,contact,role:'client'};
-  db.prepare('INSERT INTO users(id,name,contact,password_hash,role,balance,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run(u.id,u.name,u.contact,bcrypt.hashSync(password,12),u.role,0,t,t);
-  notify({userId:u.id,type:'welcome',title:'Byenvini',message:'Kont FLEX TUPUP ou pare.'});
-  res.status(201).json({token:tokenFor(u),user:getUser(u.id),wallet:{balance:0}});
-});
-app.post('/api/auth/login',(req,res)=>{
-  const contact=clean(req.body?.contact,160), password=String(req.body?.password||'');
-  const u=db.prepare('SELECT * FROM users WHERE contact=?').get(contact);
-  if(!u||!bcrypt.compareSync(password,u.password_hash)) return res.status(401).json({error:'INVALID_CREDENTIALS'});
-  res.json({token:tokenFor(u),user:getUser(u.id),wallet:{balance:u.balance}});
-});
-app.get('/api/me',auth,(req,res)=>res.json({user:getUser(req.user.sub)}));
+app.post('/api/auth/register',async(req,res)=>{try{const {name,email,password,whatsapp}=req.body||{};if(!name||!email||!password||password.length<6)return res.status(400).json({error:'name, email and password (6+) are required'});const e=email.trim().toLowerCase();const hash=await bcrypt.hash(password,12);const r=await query('INSERT INTO users(name,email,password_hash,whatsapp) VALUES($1,$2,$3,$4) RETURNING *',[name.trim(),e,hash,whatsapp||null]);const u=r.rows[0];res.status(201).json({token:tokenFor(u),user:cleanUser(u)})}catch(e){if(e.code==='23505')return res.status(409).json({error:'Email already exists'});console.error(e);res.status(500).json({error:'Registration failed'})}});
+app.post('/api/auth/login',async(req,res)=>{try{const {email,password}=req.body||{};const r=await query('SELECT * FROM users WHERE email=$1 AND active=true',[String(email||'').trim().toLowerCase()]);if(!r.rowCount||!(await bcrypt.compare(password||'',r.rows[0].password_hash)))return res.status(401).json({error:'Invalid email or password'});res.json({token:tokenFor(r.rows[0]),user:cleanUser(r.rows[0])})}catch(e){console.error(e);res.status(500).json({error:'Login failed'})}});
+app.get('/api/auth/me',auth,async(req,res)=>{const r=await query('SELECT * FROM users WHERE id=$1',[req.auth.sub]);if(!r.rowCount)return res.status(404).json({error:'User not found'});res.json({user:cleanUser(r.rows[0])})});
 
-// ---------------- wallet/topups ----------------
-app.get('/api/wallet',auth,(req,res)=>res.json({wallet:{balance:getUser(req.user.sub).balance,currency:'HTG'}}));
-app.get('/api/wallet/transactions',auth,(req,res)=>{
-  const rows=db.prepare(`SELECT id,'topup' type,amount,status,method,reference,created_at FROM topups WHERE user_id=?
-    UNION ALL SELECT id,'order',-price,status,payment,pack,created_at FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT 200`).all(req.user.sub,req.user.sub);
-  res.json({transactions:rows});
-});
-app.post('/api/wallet/topup',auth,(req,res)=>{
-  const amount=money(req.body?.amount), method=clean(req.body?.method||'manual',50), reference=clean(req.body?.reference||'',120);
-  if(amount<=0||amount>Number(process.env.MAX_TOPUP||1000000)) return res.status(400).json({error:'INVALID_AMOUNT'});
-  const t={id:makeId('TOP'),user_id:req.user.sub,amount,method,reference,status:'pending',admin_note:'',created_at:now(),updated_at:now()};
-  db.prepare('INSERT INTO topups VALUES(?,?,?,?,?,?,?,?,?)').run(t.id,t.user_id,t.amount,t.method,t.reference,t.status,t.admin_note,t.created_at,t.updated_at);
-  notify({type:'topup',title:'Nouvo dépôt',message:`${amount} HTG • ${method}`,payload:t});
-  res.status(201).json({topup:t,message:'Dépôt soumèt pou validation admin.'});
-});
+app.get('/api/payment-settings',async(req,res)=>{const r=await query('SELECT * FROM payment_settings WHERE id=1');res.json(r.rows[0]||{})});
+app.put('/api/admin/payment-settings',auth,admin,async(req,res)=>{const {moncashNumber,natcashNumber,whatsappNumber}=req.body||{};const r=await query('UPDATE payment_settings SET moncash_number=$1,natcash_number=$2,whatsapp_number=$3,updated_at=NOW() WHERE id=1 RETURNING *',[moncashNumber||'',natcashNumber||'',whatsappNumber||'']);res.json(r.rows[0])});
 
-// ---------------- game catalog ----------------
-function ruleFor(game) {
-  const x=db.prepare('SELECT category FROM game_rules WHERE lower(game)=lower(?)').get(game);
-  return x?.category || (/free fire|blood strike/i.test(game)?'id':'phone_referral');
-}
-app.get('/api/games',(req,res)=>{
-  const rows=db.prepare('SELECT id,name,image,enabled FROM games WHERE enabled=1 ORDER BY name').all();
-  res.json({games:rows});
-});
-app.get('/api/games/:id/packs',(req,res)=>{
-  const rows=db.prepare(`SELECT p.id,p.category,p.name,p.price,p.image,p.popular,p.premium,p.enabled,g.name game
-    FROM packs p JOIN games g ON g.id=p.game_id WHERE p.game_id=? AND p.enabled=1 ORDER BY p.category,p.price`).all(req.params.id);
-  res.json(rows);
-});
-app.get('/api/game-rules',(req,res)=>res.json({rules:Object.fromEntries(db.prepare('SELECT game,category FROM game_rules').all().map(x=>[x.game,x.category]))}));
-app.get('/api/referrals',(req,res)=>res.json({referrals:db.prepare('SELECT id,code,affiliate,active,created_at FROM referrals WHERE active=1 ORDER BY created_at DESC').all()}));
-app.post('/api/referrals/verify',(req,res)=>{
-  const code=clean(req.body?.code,32).toUpperCase();
-  const r=db.prepare('SELECT id,code,affiliate,active,created_at FROM referrals WHERE code=? AND active=1').get(code);
-  res.json(r?{ok:true,valid:true,referral:r}:{ok:false,valid:false,error:'INVALID_REFERRAL_CODE'});
-});
+app.get('/api/games',async(req,res)=>{const r=await query('SELECT * FROM games WHERE active=true ORDER BY sort_order,id');res.json(r.rows.map(cleanGame))});
+app.get('/api/games/:id',async(req,res)=>{const r=await query('SELECT * FROM games WHERE id=$1',[req.params.id]);if(!r.rowCount)return res.status(404).json({error:'Game not found'});res.json(cleanGame(r.rows[0]))});
+app.get('/api/games/:id/packs',async(req,res)=>{const r=await query('SELECT * FROM packs WHERE game_id=$1 AND active=true ORDER BY sort_order,id',[req.params.id]);res.json(r.rows.map(cleanPack))});
+app.get('/api/packs/:id',async(req,res)=>{const r=await query('SELECT * FROM packs WHERE id=$1',[req.params.id]);if(!r.rowCount)return res.status(404).json({error:'Pack not found'});res.json(cleanPack(r.rows[0]))});
 
-// ---------------- orders ----------------
-app.get('/api/orders',auth,(req,res)=>{
-  const rows=req.user.role==='admin'?db.prepare('SELECT o.*,u.name,u.contact FROM orders o LEFT JOIN users u ON u.id=o.user_id ORDER BY o.created_at DESC LIMIT 500').all():db.prepare('SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT 200').all(req.user.sub);
-  res.json({orders:rows});
-});
-app.post('/api/orders',auth,(req,res)=>{
-  const b=req.body||{}, game=clean(b.game,100), pack=clean(b.pack,120), price=money(b.price), category=ruleFor(game);
-  const phone=clean(b.phone||b.customerContact,40), uid=clean(b.uid,100), ref=clean(b.referral||b.referral_code,32).toUpperCase();
-  if(!game||!pack||price<=0) return res.status(400).json({error:'INVALID_ORDER'});
-  if(category==='id' && !uid) return res.status(400).json({error:'UID_REQUIRED'});
-  if(category==='phone_referral' && (!phone||!ref)) return res.status(400).json({error:'PHONE_AND_REFERRAL_REQUIRED'});
-  if(category==='dm_admin' && !phone) return res.status(400).json({error:'PHONE_REQUIRED'});
-  if(category==='phone_referral' && !db.prepare('SELECT 1 FROM referrals WHERE code=? AND active=1').get(ref)) return res.status(400).json({error:'INVALID_REFERRAL_CODE'});
-  const order= {id:makeId('ORD'),user_id:req.user.sub,game,pack,price,uid,phone,referral_code:category==='phone_referral'?ref:'',category,status:category==='dm_admin'?'admin_request':'pending',payment:category==='dm_admin'?'manual':'wallet',admin_note:category==='dm_admin'?'DM Admin':'',created_at:now(),updated_at:now()};
-  try {
-    const created=db.transaction(()=>{
-      if(category!=='dm_admin'){
-        const u=db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.sub);
-        if(u.balance<price) throw Object.assign(new Error('INSUFFICIENT_BALANCE'),{code:'INSUFFICIENT_BALANCE'});
-        db.prepare('UPDATE users SET balance=balance-?,updated_at=? WHERE id=?').run(price,now(),req.user.sub);
-      }
-      db.prepare('INSERT INTO orders VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(...Object.values(order));
-      notify({type:'new_order',title:category==='dm_admin'?'Nouvelle demande DM Admin':'Nouvelle commande',message:`${game} • ${pack} • ${price} HTG`,payload:order});
-      notify({userId:req.user.sub,type:'order_created',title:'Commande soumise',message:`${game} • ${pack} • ${price} HTG`,payload:order});
-      audit(req.user.sub,'create','order',order.id,{category,payment:order.payment});
-      return order;
-    })();
-    res.status(201).json({order:created,wallet:{balance:getUser(req.user.sub).balance}});
-  } catch(e) { if(e.code==='INSUFFICIENT_BALANCE') return res.status(400).json({error:'INSUFFICIENT_BALANCE'}); console.error(e); res.status(500).json({error:'ORDER_FAILED'}); }
-});
+app.get('/api/ads',async(req,res)=>{const r=await query('SELECT * FROM ads WHERE active=true ORDER BY sort_order,id DESC');res.json(r.rows)});
 
-// ---------------- notifications ----------------
-app.get('/api/notifications',auth,(req,res)=>{
-  const rows=req.user.role==='admin'?db.prepare('SELECT * FROM notifications WHERE user_id IS NULL ORDER BY created_at DESC LIMIT 200').all():db.prepare('SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 200').all(req.user.sub);
-  res.json({notifications:rows.map(x=>({...x,payload:JSON.parse(x.payload||'{}')}))});
-});
-app.patch('/api/notifications/:id/read',auth,(req,res)=>{db.prepare('UPDATE notifications SET read=1 WHERE id=? AND (user_id=? OR user_id IS NULL)').run(req.params.id,req.user.sub);res.json({ok:true})});
-app.post('/api/notifications/read-all',auth,(req,res)=>{if(req.user.role==='admin')db.prepare('UPDATE notifications SET read=1 WHERE user_id IS NULL').run();else db.prepare('UPDATE notifications SET read=1 WHERE user_id=?').run(req.user.sub);res.json({ok:true})});
+app.get('/api/wallet',auth,async(req,res)=>{const r=await query('SELECT id,wallet_balance FROM users WHERE id=$1',[req.auth.sub]);if(!r.rowCount)return res.status(404).json({error:'User not found'});const h=await query('SELECT * FROM wallet_deposits WHERE user_id=$1 ORDER BY id DESC LIMIT 50',[req.auth.sub]);res.json({balance:Number(r.rows[0].wallet_balance),deposits:h.rows})});
+app.post('/api/wallet/deposits',auth,async(req,res)=>{try{const {amount,method,transactionCode}=req.body||{};const a=Number(amount);if(!Number.isFinite(a)||a<=0||!['moncash','natcash'].includes(method)||!transactionCode?.trim())return res.status(400).json({error:'amount, method and transactionCode are required'});const r=await query('INSERT INTO wallet_deposits(user_id,amount,method,transaction_code) VALUES($1,$2,$3,$4) RETURNING *',[req.auth.sub,a,method,transactionCode.trim()]);await query(`INSERT INTO notifications(user_id,type,title,message) SELECT id,'wallet_deposit','Recharge en attente',$1 FROM users WHERE role='admin'`,[`Nouvelle recharge de ${a} GDS via ${method}.`]);res.status(201).json(r.rows[0])}catch(e){if(e.code==='23505')return res.status(409).json({error:'This transaction code was already submitted'});console.error(e);res.status(500).json({error:'Deposit submission failed'})}});
 
-// ---------------- tutorial/media ----------------
-app.get('/api/tutorial',(req,res)=>{const x=db.prepare('SELECT config FROM tutorial WHERE id=1').get();res.json(x?JSON.parse(x.config):{enabled:false})});
-app.get('/api/admin/tutorial',admin,(req,res)=>{const x=db.prepare('SELECT config FROM tutorial WHERE id=1').get();res.json(x?JSON.parse(x.config):{})});
-app.put('/api/admin/tutorial',admin,(req,res)=>{db.prepare('INSERT OR REPLACE INTO tutorial(id,config,updated_at) VALUES(1,?,?)').run(JSON.stringify(req.body||{}),now());audit(req.user.sub,'update','tutorial','1',req.body||{});res.json({ok:true})});
-app.get('/api/admin/media',admin,(req,res)=>res.json({media:db.prepare('SELECT * FROM media').all()}));
-app.put('/api/admin/media',admin,(req,res)=>{const media=req.body?.media||req.body||{};db.transaction(()=>{for(const [key,url] of Object.entries(media))db.prepare('INSERT OR REPLACE INTO media(key,url,updated_at) VALUES(?,?,?)').run(clean(key,80),clean(url,2000),now())})();audit(req.user.sub,'update','media','bulk',media);res.json({ok:true})});
+app.get('/api/orders',auth,async(req,res)=>{const r=await query(`SELECT o.*,g.name game_name,p.name pack_name FROM orders o JOIN games g ON g.id=o.game_id JOIN packs p ON p.id=o.pack_id WHERE o.user_id=$1 ORDER BY o.id DESC`,[req.auth.sub]);res.json(r.rows)});
+app.post('/api/orders',auth,async(req,res)=>{const client=await pool.connect();try{const {packId,playerId,whatsapp}=req.body||{};await client.query('BEGIN');const p=await client.query('SELECT p.*,g.name game_name,g.active game_active FROM packs p JOIN games g ON g.id=p.game_id WHERE p.id=$1 AND p.active=true',[packId]);if(!p.rowCount||!p.rows[0].game_active){await client.query('ROLLBACK');return res.status(404).json({error:'Pack unavailable'})}const pack=p.rows[0];const u=await client.query('SELECT wallet_balance FROM users WHERE id=$1 FOR UPDATE',[req.auth.sub]);const bal=Number(u.rows[0].wallet_balance),price=Number(pack.price);if(bal<price){await client.query('ROLLBACK');return res.status(402).json({error:'Insufficient wallet balance',balance:bal,required:price})}const o=await client.query('INSERT INTO orders(user_id,pack_id,game_id,price,player_id,whatsapp,status) VALUES($1,$2,$3,$4,$5,$6,\'paid\') RETURNING *',[req.auth.sub,pack.id,pack.game_id,price,playerId||null,whatsapp||null]);const nb=bal-price;await client.query('UPDATE users SET wallet_balance=$1,updated_at=NOW() WHERE id=$2',[nb,req.auth.sub]);await client.query('INSERT INTO wallet_ledger(user_id,type,amount,reference_type,reference_id,balance_after,note) VALUES($1,\'purchase\',$2,\'order\',$3,$4,$5)',[req.auth.sub,-price,o.rows[0].id,nb,`Achat ${pack.name}`]);await client.query('INSERT INTO notifications(type,title,message) VALUES(\'new_order\',\'Nouvelle commande\',$1)',[`Commande #${o.rows[0].id} — ${pack.game_name} / ${pack.name}`]);await client.query('COMMIT');res.status(201).json({order:o.rows[0],balance:nb})}catch(e){await client.query('ROLLBACK');console.error(e);res.status(500).json({error:'Order failed'})}finally{client.release()}});
 
-// ---------------- admin game/catalog management ----------------
-app.get('/api/admin/game-rules',admin,(req,res)=>res.json({rules:Object.fromEntries(db.prepare('SELECT game,category FROM game_rules').all().map(x=>[x.game,x.category]))}));
-app.put('/api/admin/game-rules',admin,(req,res)=>{const rules=req.body?.rules||{};for(const [game,category] of Object.entries(rules)){if(!['id','phone_referral','dm_admin'].includes(category))continue;db.prepare('INSERT OR REPLACE INTO game_rules(game,category) VALUES(?,?)').run(clean(game,100),category)}audit(req.user.sub,'update','game_rules','bulk',rules);res.json({ok:true})});
-app.get('/api/admin/games',admin,(req,res)=>res.json({games:db.prepare('SELECT * FROM games ORDER BY name').all()}));
-app.post('/api/admin/games',admin,(req,res)=>{const name=clean(req.body?.name,100);if(!name)return res.status(400).json({error:'NAME_REQUIRED'});try{const t=now();const x=db.prepare('INSERT INTO games(name,image,enabled,created_at,updated_at) VALUES(?,?,?,?,?)').run(name,clean(req.body?.image,2000),req.body?.enabled===false?0:1,t,t);res.status(201).json({game:db.prepare('SELECT * FROM games WHERE id=?').get(x.lastInsertRowid)})}catch{res.status(409).json({error:'GAME_EXISTS'})}});
-app.put('/api/admin/games/:id',admin,(req,res)=>{const g=db.prepare('SELECT * FROM games WHERE id=?').get(req.params.id);if(!g)return res.status(404).json({error:'GAME_NOT_FOUND'});db.prepare('UPDATE games SET name=?,image=?,enabled=?,updated_at=? WHERE id=?').run(clean(req.body?.name??g.name,100),clean(req.body?.image??g.image,2000),req.body?.enabled===false?0:1,now(),g.id);res.json({game:db.prepare('SELECT * FROM games WHERE id=?').get(g.id)})});
-app.delete('/api/admin/games/:id',admin,(req,res)=>{db.prepare('DELETE FROM games WHERE id=?').run(req.params.id);res.json({ok:true})});
-app.get('/api/admin/games/:id/packs',admin,(req,res)=>res.json({packs:db.prepare('SELECT * FROM packs WHERE game_id=? ORDER BY category,price').all(req.params.id)}));
-app.post('/api/admin/games/:id/packs',admin,(req,res)=>{const g=db.prepare('SELECT id FROM games WHERE id=?').get(req.params.id);if(!g)return res.status(404).json({error:'GAME_NOT_FOUND'});const name=clean(req.body?.name,120),category=clean(req.body?.category||'Plans',80),price=money(req.body?.price);if(!name||price<=0)return res.status(400).json({error:'INVALID_PACK'});const x=db.prepare('INSERT INTO packs(game_id,category,name,price,image,popular,premium,enabled) VALUES(?,?,?,?,?,?,?,?)').run(g.id,category,name,price,clean(req.body?.image,2000),req.body?.popular?1:0,req.body?.premium?1:0,req.body?.enabled===false?0:1);res.status(201).json({pack:db.prepare('SELECT * FROM packs WHERE id=?').get(x.lastInsertRowid)})});
-app.put('/api/admin/packs/:id',admin,(req,res)=>{const p=db.prepare('SELECT * FROM packs WHERE id=?').get(req.params.id);if(!p)return res.status(404).json({error:'PACK_NOT_FOUND'});db.prepare('UPDATE packs SET category=?,name=?,price=?,image=?,popular=?,premium=?,enabled=? WHERE id=?').run(clean(req.body?.category??p.category,80),clean(req.body?.name??p.name,120),money(req.body?.price??p.price),clean(req.body?.image??p.image,2000),req.body?.popular?1:0,req.body?.premium?1:0,req.body?.enabled===false?0:1,p.id);res.json({pack:db.prepare('SELECT * FROM packs WHERE id=?').get(p.id)})});
-app.delete('/api/admin/packs/:id',admin,(req,res)=>{db.prepare('DELETE FROM packs WHERE id=?').run(req.params.id);res.json({ok:true})});
+app.get('/api/notifications',auth,async(req,res)=>{const r=await query(`SELECT * FROM notifications WHERE user_id=$1 OR user_id IS NULL ORDER BY id DESC LIMIT 100`,[req.auth.sub]);res.json(r.rows)});
+app.post('/api/notifications/:id/read',auth,async(req,res)=>{await query('UPDATE notifications SET read_at=NOW() WHERE id=$1 AND (user_id=$2 OR user_id IS NULL)',[req.params.id,req.auth.sub]);res.json({ok:true})});
 
-// ---------------- admin referrals ----------------
-app.get('/api/admin/referrals',admin,(req,res)=>res.json({referrals:db.prepare('SELECT * FROM referrals ORDER BY created_at DESC').all()}));
-app.post('/api/admin/referrals',admin,(req,res)=>{const code=clean(req.body?.code,32).toUpperCase(),affiliate=clean(req.body?.affiliate,120);if(!/^[A-Z0-9_-]{3,32}$/.test(code)||!affiliate)return res.status(400).json({error:'INVALID_REFERRAL'});const r={id:makeId('REF'),code,affiliate,active:req.body?.active===false?0:1,created_at:now()};try{db.prepare('INSERT INTO referrals VALUES(?,?,?,?,?)').run(...Object.values(r));audit(req.user.sub,'create','referral',r.id,r);res.status(201).json({referral:r})}catch{res.status(409).json({error:'CODE_EXISTS'})}});
-app.put('/api/admin/referrals/:id',admin,(req,res)=>{const old=db.prepare('SELECT * FROM referrals WHERE id=?').get(req.params.id);if(!old)return res.status(404).json({error:'NOT_FOUND'});const code=clean(req.body?.code??old.code,32).toUpperCase();db.prepare('UPDATE referrals SET code=?,affiliate=?,active=? WHERE id=?').run(code,clean(req.body?.affiliate??old.affiliate,120),req.body?.active===false?0:1,old.id);res.json({referral:db.prepare('SELECT * FROM referrals WHERE id=?').get(old.id)})});
-app.delete('/api/admin/referrals/:id',admin,(req,res)=>{db.prepare('DELETE FROM referrals WHERE id=?').run(req.params.id);res.json({ok:true})});
+// Admin
+app.get('/api/admin/dashboard',auth,admin,async(req,res)=>{const [u,o,d,g,p]=await Promise.all([query('SELECT COUNT(*) n FROM users WHERE role=\'client\''),query('SELECT COUNT(*) n FROM orders'),query('SELECT COUNT(*) n FROM wallet_deposits WHERE status=\'pending\''),query('SELECT COUNT(*) n FROM games WHERE active=true'),query('SELECT COUNT(*) n FROM packs WHERE active=true')]);res.json({clients:Number(u.rows[0].n),orders:Number(o.rows[0].n),pendingDeposits:Number(d.rows[0].n),games:Number(g.rows[0].n),packs:Number(p.rows[0].n)})});
+app.get('/api/admin/users',auth,admin,async(req,res)=>{const r=await query('SELECT * FROM users ORDER BY id DESC');res.json(r.rows.map(cleanUser))});
+app.patch('/api/admin/users/:id',auth,admin,async(req,res)=>{const {name,whatsapp,active,role}=req.body||{};const r=await query('UPDATE users SET name=COALESCE($1,name),whatsapp=COALESCE($2,whatsapp),active=COALESCE($3,active),role=COALESCE($4,role),updated_at=NOW() WHERE id=$5 RETURNING *',[name,whatsapp,active,role,req.params.id]);if(!r.rowCount)return res.status(404).json({error:'User not found'});res.json(cleanUser(r.rows[0]))});
+app.get('/api/admin/games',auth,admin,async(req,res)=>{const r=await query('SELECT * FROM games ORDER BY sort_order,id');res.json(r.rows.map(cleanGame))});
+app.post('/api/admin/games',auth,admin,async(req,res)=>{const {name,image,active,sortOrder}=req.body||{};if(!name?.trim())return res.status(400).json({error:'name required'});const r=await query('INSERT INTO games(name,image,active,sort_order) VALUES($1,$2,COALESCE($3,true),COALESCE($4,0)) RETURNING *',[name.trim(),image||null,active,sortOrder]);res.status(201).json(cleanGame(r.rows[0]))});
+app.patch('/api/admin/games/:id',auth,admin,async(req,res)=>{const {name,image,active,sortOrder}=req.body||{};const r=await query('UPDATE games SET name=COALESCE($1,name),image=COALESCE($2,image),active=COALESCE($3,active),sort_order=COALESCE($4,sort_order),updated_at=NOW() WHERE id=$5 RETURNING *',[name,image,active,sortOrder,req.params.id]);if(!r.rowCount)return res.status(404).json({error:'Game not found'});res.json(cleanGame(r.rows[0]))});
+app.delete('/api/admin/games/:id',auth,admin,async(req,res)=>{await query('DELETE FROM games WHERE id=$1',[req.params.id]);res.json({ok:true})});
+app.get('/api/admin/games/:id/packs',auth,admin,async(req,res)=>{const r=await query('SELECT * FROM packs WHERE game_id=$1 ORDER BY sort_order,id',[req.params.id]);res.json(r.rows.map(cleanPack))});
+app.post('/api/admin/games/:id/packs',auth,admin,async(req,res)=>{const {name,quantity,price,image,active,popular,sortOrder}=req.body||{};if(!name||Number(price)<0)return res.status(400).json({error:'name and valid price required'});const r=await query('INSERT INTO packs(game_id,name,quantity,price,image,active,popular,sort_order) VALUES($1,$2,$3,$4,$5,COALESCE($6,true),COALESCE($7,false),COALESCE($8,0)) RETURNING *',[req.params.id,name,Number(quantity||0),Number(price),image||null,active,popular,sortOrder]);res.status(201).json(cleanPack(r.rows[0]))});
+app.patch('/api/admin/packs/:id',auth,admin,async(req,res)=>{const {name,quantity,price,image,active,popular,sortOrder}=req.body||{};const r=await query('UPDATE packs SET name=COALESCE($1,name),quantity=COALESCE($2,quantity),price=COALESCE($3,price),image=COALESCE($4,image),active=COALESCE($5,active),popular=COALESCE($6,popular),sort_order=COALESCE($7,sort_order),updated_at=NOW() WHERE id=$8 RETURNING *',[name,quantity,price,image,active,popular,sortOrder,req.params.id]);if(!r.rowCount)return res.status(404).json({error:'Pack not found'});res.json(cleanPack(r.rows[0]))});
+app.delete('/api/admin/packs/:id',auth,admin,async(req,res)=>{await query('DELETE FROM packs WHERE id=$1',[req.params.id]);res.json({ok:true})});
 
-// ---------------- admin orders/topups/notifications ----------------
-app.patch('/api/admin/orders/:id',admin,(req,res)=>{const o=db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);if(!o)return res.status(404).json({error:'ORDER_NOT_FOUND'});const status=clean(req.body?.status||o.status,40),note=clean(req.body?.admin_note??o.admin_note,500);db.prepare('UPDATE orders SET status=?,admin_note=?,updated_at=? WHERE id=?').run(status,note,now(),o.id);notify({userId:o.user_id,type:'order_update',title:'Mizajou commande',message:`${o.game} • ${status}`,payload:{orderId:o.id,status,note}});audit(req.user.sub,'update','order',o.id,{status,note});res.json({ok:true,order:db.prepare('SELECT * FROM orders WHERE id=?').get(o.id)})});
-app.post('/api/admin/notifications',admin,(req,res)=>{const b=req.body||{};const n=notify({type:b.type||'admin',title:clean(b.title||'Notification',120),message:clean(b.message||'',500),payload:b.order||b});res.status(201).json({ok:true,notification:n})});
-app.get('/api/admin/topups',admin,(req,res)=>res.json({topups:db.prepare('SELECT t.*,u.name,u.contact FROM topups t JOIN users u ON u.id=t.user_id ORDER BY t.created_at DESC LIMIT 500').all()}));
-function finishTopup(id,status,note,actor){const t=db.prepare('SELECT * FROM topups WHERE id=?').get(id);if(!t||t.status!=='pending')throw Object.assign(new Error('TOPUP_NOT_FOUND'),{code:'TOPUP_NOT_FOUND'});db.transaction(()=>{db.prepare('UPDATE topups SET status=?,admin_note=?,updated_at=? WHERE id=?').run(status,note,t.id);if(status==='approved')db.prepare('UPDATE users SET balance=balance+?,updated_at=? WHERE id=?').run(t.amount,now(),t.user_id);notify({userId:t.user_id,type:`topup_${status}`,title:status==='approved'?'Dépôt approuvé':'Dépôt refusé',message:status==='approved'?`${t.amount} HTG ajouté à votre Wallet.`:`Dépôt refusé: ${note||'contactez admin'}.`,payload:{...t,status,note}});audit(actor,`topup_${status}`,'topup',t.id,{amount:t.amount,note});})();return getUser(t.user_id).balance;}
-app.post('/api/admin/topups/:id/approve',admin,(req,res)=>{try{res.json({ok:true,balance:finishTopup(req.params.id,'approved',clean(req.body?.admin_note,500),req.user.sub)})}catch(e){res.status(404).json({error:e.code||'TOPUP_NOT_FOUND'})}});
-app.post('/api/admin/topups/:id/reject',admin,(req,res)=>{try{finishTopup(req.params.id,'rejected',clean(req.body?.admin_note,500),req.user.sub);res.json({ok:true})}catch(e){res.status(404).json({error:e.code||'TOPUP_NOT_FOUND'})}});
+app.get('/api/admin/deposits',auth,admin,async(req,res)=>{const r=await query(`SELECT d.*,u.name,u.email,u.whatsapp FROM wallet_deposits d JOIN users u ON u.id=d.user_id ORDER BY d.id DESC`);res.json(r.rows)});
+app.post('/api/admin/deposits/:id/approve',auth,admin,async(req,res)=>{const c=await pool.connect();try{await c.query('BEGIN');const d=await c.query('SELECT * FROM wallet_deposits WHERE id=$1 FOR UPDATE',[req.params.id]);if(!d.rowCount){await c.query('ROLLBACK');return res.status(404).json({error:'Deposit not found'})}if(d.rows[0].status!=='pending'){await c.query('ROLLBACK');return res.status(409).json({error:'Deposit already reviewed'})}const dep=d.rows[0];const u=await c.query('SELECT wallet_balance FROM users WHERE id=$1 FOR UPDATE',[dep.user_id]);const nb=Number(u.rows[0].wallet_balance)+Number(dep.amount);await c.query('UPDATE users SET wallet_balance=$1,updated_at=NOW() WHERE id=$2',[nb,dep.user_id]);await c.query('UPDATE wallet_deposits SET status=\'approved\',reviewed_by=$1,reviewed_at=NOW(),admin_note=$2 WHERE id=$3',[req.auth.sub,req.body?.note||null,dep.id]);await c.query('INSERT INTO wallet_ledger(user_id,type,amount,reference_type,reference_id,balance_after,note) VALUES($1,\'deposit\',$2,\'wallet_deposit\',$3,$4,$5)',[dep.user_id,Number(dep.amount),dep.id,nb,'Recharge approuvée']);await c.query('INSERT INTO notifications(user_id,type,title,message) VALUES($1,\'wallet_approved\',\'Wallet crédité\',$2)',[dep.user_id,`Votre recharge de ${dep.amount} GDS a été confirmée.`]);await c.query('COMMIT');res.json({ok:true,balance:nb})}catch(e){await c.query('ROLLBACK');console.error(e);res.status(500).json({error:'Approval failed'})}finally{c.release()}});
+app.post('/api/admin/deposits/:id/reject',auth,admin,async(req,res)=>{const r=await query('UPDATE wallet_deposits SET status=\'rejected\',reviewed_by=$1,reviewed_at=NOW(),admin_note=$2 WHERE id=$3 AND status=\'pending\' RETURNING *',[req.auth.sub,req.body?.note||null,req.params.id]);if(!r.rowCount)return res.status(409).json({error:'Deposit not found or already reviewed'});await query('INSERT INTO notifications(user_id,type,title,message) VALUES($1,\'wallet_rejected\',\'Recharge refusée\',$2)',[r.rows[0].user_id,`Votre recharge de ${r.rows[0].amount} GDS a été refusée.`]);res.json(r.rows[0])});
 
-// ---------------- settings/audit ----------------
-app.get('/api/settings',(req,res)=>{const rows=db.prepare('SELECT key,value FROM settings').all();res.json({settings:Object.fromEntries(rows.map(x=>[x.key,x.value]))})});
-app.get('/api/admin/audit',admin,(req,res)=>res.json({logs:db.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 500').all()}));
-app.get('/api/admin/users',admin,(req,res)=>res.json({users:db.prepare('SELECT id,name,contact,role,balance,created_at,updated_at FROM users ORDER BY created_at DESC LIMIT 1000').all()}));
+app.get('/api/admin/orders',auth,admin,async(req,res)=>{const r=await query(`SELECT o.*,u.name,u.email,u.whatsapp,g.name game_name,p.name pack_name FROM orders o JOIN users u ON u.id=o.user_id JOIN games g ON g.id=o.game_id JOIN packs p ON p.id=o.pack_id ORDER BY o.id DESC`);res.json(r.rows)});
+app.patch('/api/admin/orders/:id',auth,admin,async(req,res)=>{const {status,fulfillmentNote}=req.body||{};if(!['paid','processing','completed','rejected','cancelled'].includes(status))return res.status(400).json({error:'Invalid status'});const r=await query('UPDATE orders SET status=$1,fulfillment_note=COALESCE($2,fulfillment_note),updated_at=NOW() WHERE id=$3 RETURNING *',[status,fulfillmentNote,req.params.id]);if(!r.rowCount)return res.status(404).json({error:'Order not found'});await query('INSERT INTO notifications(user_id,type,title,message) VALUES($1,\'order_update\',\'Commande mise à jour\',$2)',[r.rows[0].user_id,`Votre commande #${r.rows[0].id} est maintenant: ${status}.`]);res.json(r.rows[0])});
 
-// static frontend
-app.use(express.static('public'));
-app.get('*',(req,res)=>res.sendFile(process.cwd()+'/public/index.html'));
+app.get('/api/admin/ads',auth,admin,async(req,res)=>{const r=await query('SELECT * FROM ads ORDER BY sort_order,id DESC');res.json(r.rows)});
+app.post('/api/admin/ads',auth,admin,async(req,res)=>{const {title,image,price,active,sortOrder}=req.body||{};if(!title)return res.status(400).json({error:'title required'});const r=await query('INSERT INTO ads(title,image,price,active,sort_order) VALUES($1,$2,$3,COALESCE($4,true),COALESCE($5,0)) RETURNING *',[title,image||null,price==null?null:Number(price),active,sortOrder]);res.status(201).json(r.rows[0])});
+app.patch('/api/admin/ads/:id',auth,admin,async(req,res)=>{const {title,image,price,active,sortOrder}=req.body||{};const r=await query('UPDATE ads SET title=COALESCE($1,title),image=COALESCE($2,image),price=COALESCE($3,price),active=COALESCE($4,active),sort_order=COALESCE($5,sort_order),updated_at=NOW() WHERE id=$6 RETURNING *',[title,image,price,active,sortOrder,req.params.id]);if(!r.rowCount)return res.status(404).json({error:'Ad not found'});res.json(r.rows[0])});
+app.delete('/api/admin/ads/:id',auth,admin,async(req,res)=>{await query('DELETE FROM ads WHERE id=$1',[req.params.id]);res.json({ok:true})});
 
-app.listen(PORT,()=>console.log(`FLEX TUPUP backend listening on http://localhost:${PORT}`));
+app.use((err,req,res,next)=>{console.error(err);if(err.message==='CORS not allowed')return res.status(403).json({error:err.message});res.status(500).json({error:'Internal server error'})});
+app.use((req,res)=>res.status(404).json({error:'Route not found'}));
+
+const port=Number(process.env.PORT||10000);
+migrate().then(()=>app.listen(port,'0.0.0.0',()=>console.log(`Flex Tupup backend listening on ${port}`))).catch(e=>{console.error('Startup failed',e);process.exit(1)});
+process.on('SIGTERM',async()=>{await pool.end();process.exit(0)});
