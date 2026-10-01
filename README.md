@@ -1,44 +1,60 @@
-# Flex Tupup Backend v1
 
-Clean Node.js + Express + PostgreSQL backend for the Flex Tupup wallet/order/admin workflow.
+# FLEX TUPUP Backend — Wallet Recharge Ready
 
-## Render
-- Build command: `npm install`
-- Start command: `npm start`
-- Add the variables from `.env.example`.
-- `DATABASE_URL` must be your Render PostgreSQL connection string.
-- `JWT_SECRET` must be a long random secret.
-- `CORS_ORIGINS` should contain the exact frontend origin(s), comma-separated.
+This backend fixes the exact missing route from the Wallet screenshot:
 
-## Main API
-- `GET /health`
-- `POST /api/auth/register`
-- `POST /api/auth/login`
-- `GET /api/auth/me`
-- `GET /api/games`
-- `GET /api/games/:id/packs`
-- `GET /api/payment-settings`
-- `GET /api/wallet`
-- `POST /api/wallet/deposits`
-- `GET /api/orders`
-- `POST /api/orders`
-- `GET /api/notifications`
+POST /api/wallet/deposits
 
-Admin routes require a JWT belonging to an admin:
-- `/api/admin/dashboard`
-- `/api/admin/users`
-- `/api/admin/games`
-- `/api/admin/games/:id/packs`
-- `/api/admin/packs/:id`
-- `/api/admin/deposits`
-- `/api/admin/deposits/:id/approve`
-- `/api/admin/deposits/:id/reject`
-- `/api/admin/orders`
-- `/api/admin/ads`
-- `/api/admin/payment-settings`
+A client submits:
+- method: MonCash or NatCash
+- amount
+- transaction_reference / tx
+- phone / senderPhone
+- note
+- status is always stored as pending
 
-## Wallet rules
-A wallet deposit is always `pending` first. Only an admin approval transaction increases the wallet balance. A purchase uses a database transaction and row lock, so the balance cannot go negative from concurrent purchases.
+The admin can then confirm or refuse the deposit.
+
+## Deploy on Render
+
+Create a PostgreSQL database on Render (or use another PostgreSQL provider), then create a Web Service from this folder.
+
+Build command:
+npm install
+
+Start command:
+npm start
+
+Required environment variables:
+DATABASE_URL
+JWT_SECRET
+ADMIN_EMAIL
+ADMIN_PASSWORD
+CORS_ORIGINS
+
+Recommended:
+ADMIN_NAME
+ADMIN_PHONE
+MONCASH_NUMBER
+NATCASH_NUMBER
+ADMIN_WHATSAPP
+PGSSL=true
+
+## Frontend API URL
+
+Your HTML should use:
+https://YOUR-BACKEND.onrender.com/api
+
+For the backend URL you mentioned earlier:
+https://flex-new-backend.onrender.com/api
+
+Health test:
+https://flex-new-backend.onrender.com/health
 
 ## Important
-This backend does not contain fake payment confirmation or simulated balances. MonCash/NatCash transaction codes are submitted for manual admin verification. Actual automated payment-provider integration can be added later without changing the wallet accounting model.
+
+Do not put fake payment confirmation in the frontend.
+A deposit remains pending until the admin confirms it through the backend.
+
+The backend credits the wallet only once when a pending deposit is confirmed.
+Duplicate transaction references for the same user are rejected.
