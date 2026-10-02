@@ -1,60 +1,45 @@
+# FLEX TUPUP — Backend rapide Wallet
 
-# FLEX TUPUP Backend — Wallet Recharge Ready
+Ce backend est conçu pour le fichier FLEX TUPUP actuel. Il expose notamment :
 
-This backend fixes the exact missing route from the Wallet screenshot:
+- `GET /health`
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `GET /api/auth/me`
+- `GET /api/wallet`
+- `POST /api/wallet/deposits`
+- `GET /api/wallet/deposits`
+- `GET /api/admin/deposits`
+- `PATCH /api/admin/deposits/:id` avec `{ "status": "confirmed" }` ou `{ "status": "refused" }`
+- `POST /api/admin/deposits/:id/confirm`
+- `POST /api/admin/deposits/:id/refuse`
+- `GET/POST/PUT/DELETE /api/admin/games...`
+- `GET/POST/PUT/DELETE /api/games/:id/packs...`
+- `POST /api/orders`, `GET /api/admin/orders`, mise à jour des statuts
+- `GET/PUT /api/admin/payment-settings`
+- `GET/POST/PATCH /api/admin/notifications...`
+- `GET /api/admin/users`
 
-POST /api/wallet/deposits
+## Déploiement Render
 
-A client submits:
-- method: MonCash or NatCash
-- amount
-- transaction_reference / tx
-- phone / senderPhone
-- note
-- status is always stored as pending
+Le service web Render peut être gratuit, mais le service Free peut se mettre en veille après 15 minutes sans trafic et peut prendre environ une minute à se réveiller. Les fichiers locaux d'un service Free ne sont pas persistants. Utilisez donc PostgreSQL pour les données Wallet. Voir la documentation Render officielle.
 
-The admin can then confirm or refuse the deposit.
+1. Mettez ce dossier dans un dépôt GitHub.
+2. Render → New → Web Service → sélectionnez le dépôt.
+3. Build command : `npm install`
+4. Start command : `npm start`
+5. Plan : Free.
+6. Ajoutez les variables de `.env.example`.
+7. Utilisez une base PostgreSQL externe fiable avec `DATABASE_URL` (par exemple votre base PostgreSQL existante).
 
-## Deploy on Render
+## Point important Wallet
 
-Create a PostgreSQL database on Render (or use another PostgreSQL provider), then create a Web Service from this folder.
+Lorsqu'un admin confirme une recharge, le backend fait une transaction SQL atomique :
+1. verrouille le dépôt et l'utilisateur,
+2. vérifie que le dépôt est encore `pending`,
+3. crédite le montant une seule fois,
+4. passe le dépôt à `confirmed`.
 
-Build command:
-npm install
+Une deuxième tentative de confirmation ne recrédite pas le Wallet.
 
-Start command:
-npm start
-
-Required environment variables:
-DATABASE_URL
-JWT_SECRET
-ADMIN_EMAIL
-ADMIN_PASSWORD
-CORS_ORIGINS
-
-Recommended:
-ADMIN_NAME
-ADMIN_PHONE
-MONCASH_NUMBER
-NATCASH_NUMBER
-ADMIN_WHATSAPP
-PGSSL=true
-
-## Frontend API URL
-
-Your HTML should use:
-https://YOUR-BACKEND.onrender.com/api
-
-For the backend URL you mentioned earlier:
-https://flex-new-backend.onrender.com/api
-
-Health test:
-https://flex-new-backend.onrender.com/health
-
-## Important
-
-Do not put fake payment confirmation in the frontend.
-A deposit remains pending until the admin confirms it through the backend.
-
-The backend credits the wallet only once when a pending deposit is confirmed.
-Duplicate transaction references for the same user are rejected.
+Le backend ne simule pas un paiement externe : `transaction_reference` est enregistré comme preuve/référence et la confirmation reste une action administrative manuelle.

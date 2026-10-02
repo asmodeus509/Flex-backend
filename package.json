@@ -1,21 +1,23 @@
 {
-  "name": "flex-tupup-backend",
+  "name": "flex-tupup-backend-fast",
   "version": "1.0.0",
   "private": true,
-  "description": "FLEX TUPUP backend with PostgreSQL, JWT auth and real wallet deposit workflow.",
-  "main": "server.js",
+  "description": "Fast Render-ready API for FLEX TUPUP Wallet, deposits, orders, games, packs and admin operations.",
+  "main": "src/server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node src/server.js",
+    "check": "node --check src/server.js && node --check src/db.js && node --check src/auth.js && node --check src/routes.js",
+    "test": "node scripts/contract-test.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
+    "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.2",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
-    "pg": "^8.13.1"
+    "pg": "^8.16.3"
   }
 }
