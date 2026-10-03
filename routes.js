@@ -142,6 +142,8 @@ async function confirmDeposit(req,res,next){
 router.patch('/api/admin/deposits/:id', authMiddleware, adminOnly, confirmDeposit);
 router.post('/api/admin/deposits/:id/confirm', authMiddleware, adminOnly, (req,res,next)=>{ req.body={...(req.body||{}),status:'confirmed'}; confirmDeposit(req,res,next); });
 router.post('/api/admin/deposits/:id/refuse', authMiddleware, adminOnly, (req,res,next)=>{ req.body={...(req.body||{}),status:'refused'}; confirmDeposit(req,res,next); });
+// Explicit validation alias used by the current admin panel.
+router.post('/api/admin/deposits/:id/validate', authMiddleware, adminOnly, (req,res,next)=>{ req.body={...(req.body||{}),status:req.body?.status==='refused'?'refused':'confirmed'}; confirmDeposit(req,res,next); });
 router.patch('/api/wallet/deposits/:id', authMiddleware, adminOnly, confirmDeposit);
 router.get('/api/admin/deposits', authMiddleware, adminOnly, async(req,res,next)=>{
   try{

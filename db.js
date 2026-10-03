@@ -126,6 +126,21 @@ async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS ix_notifications_created ON notifications(created_at DESC);
   `);
+  // Non-destructive compatibility migrations for databases created by older FLEX TUPUP versions.
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(14,2) NOT NULL DEFAULT 0`);
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'client'`);
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE`);
+  await q(`ALTER TABLE wallet_deposits ADD COLUMN IF NOT EXISTS sender_phone TEXT NOT NULL DEFAULT ''`);
+  await q(`ALTER TABLE wallet_deposits ADD COLUMN IF NOT EXISTS note TEXT NOT NULL DEFAULT ''`);
+  await q(`ALTER TABLE wallet_deposits ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending'`);
+  await q(`ALTER TABLE wallet_deposits ADD COLUMN IF NOT EXISTS credited_at TIMESTAMPTZ`);
+  await q(`ALTER TABLE wallet_deposits ADD COLUMN IF NOT EXISTS confirmed_by BIGINT`);
+  await q(`ALTER TABLE wallet_deposits ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
+  await q(`ALTER TABLE wallet_deposits ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
+  await q(`CREATE UNIQUE INDEX IF NOT EXISTS ux_wallet_deposit_ref_method ON wallet_deposits(method, transaction_reference)`);
+  await q(`CREATE INDEX IF NOT EXISTS ix_wallet_deposits_status_created ON wallet_deposits(status, created_at DESC)`);
+  await q(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS user_id BIGINT`);
+  await q(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS read BOOLEAN NOT NULL DEFAULT FALSE`);
 }
 
 module.exports = { pool, q, transaction, initDb, hasDb };
