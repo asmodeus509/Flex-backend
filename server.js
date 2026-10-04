@@ -7,15 +7,31 @@ const { ensurePrincipalAdmin } = require('./auth');
 
 const app = express();
 app.set('trust proxy', 1);
-app.use(cors({
+
+// CORS is intentionally handled before every route because the existing FLEX TUPUP
+// HTML sends JSON + Authorization headers. Browsers therefore perform an OPTIONS
+// preflight before POST /api/wallet/deposits. The local Android file viewer may send
+// Origin: null, so that origin is explicitly accepted as well.
+const corsOptions = {
   origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    const allowed = String(process.env.CORS_ORIGINS || '').split(',').map(x=>x.trim()).filter(Boolean);
-    if (!allowed.length || allowed.includes('*') || allowed.includes(origin)) return cb(null, true);
+    if (!origin || origin === 'null') return cb(null, true);
+    const raw = String(process.env.CORS_ORIGINS || '').trim();
+    const allowed = raw.split(',').map(x => x.trim()).filter(Boolean);
+    if (!raw || allowed.includes('*') || allowed.includes(origin)) return cb(null, true);
     return cb(new Error('CORS_NOT_ALLOWED'));
   },
-  credentials: false
-}));
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'X-Requested-With'],
+  exposedHeaders: ['Content-Length'],
+  credentials: false,
+  optionsSuccessStatus: 204,
+  maxAge: 86400
+};
+
+app.use(cors(corsOptions));
+// Express 5 does not accept the old '*' string pattern reliably; a RegExp safely
+// answers preflight requests for every API route.
+app.options(/.*/, cors(corsOptions));
 app.use(express.json({ limit: '12mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use((req,res,next)=>{res.setHeader('Cache-Control','no-store'); next();});

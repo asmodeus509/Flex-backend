@@ -35,3 +35,9 @@ MAX_WALLET_DEPOSIT=500000
 MIN_WALLET_DEPOSIT=1
 
 `initDb()` includes non-destructive compatibility migrations for older databases.
+
+
+CORS / Android local HTML:
+- The server accepts normal browser origins plus `Origin: null` used by some Android file/content viewers.
+- JSON + Authorization requests are covered by an explicit OPTIONS preflight handler.
+- `CORS_ORIGINS=*` is used in the included Render config so the existing local HTML can reach the API. For production, it can later be restricted to the exact Vercel domain.

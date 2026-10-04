@@ -20,7 +20,7 @@ services:
       - key: ADMIN_NAME
         value: FLEX TUPUP Admin
       - key: CORS_ORIGINS
-        sync: false
+        value: "*"
       - key: MAX_WALLET_DEPOSIT
         value: 500000
       - key: MIN_WALLET_DEPOSIT
